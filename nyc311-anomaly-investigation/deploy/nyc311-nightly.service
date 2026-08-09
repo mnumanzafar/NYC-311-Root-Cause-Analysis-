@@ -1,0 +1,16 @@
+[Unit]
+Description=NYC 311 nightly cohort-comparison refresh and export
+After=network-online.target postgresql.service
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+User=analytics
+WorkingDirectory=/opt/nyc311-anomaly-investigation
+EnvironmentFile=-/opt/nyc311-anomaly-investigation/.env
+ExecStart=/opt/nyc311-anomaly-investigation/deploy/nightly_export.sh
+TimeoutStartSec=1800
+Nice=10
+
+[Install]
+WantedBy=multi-user.target

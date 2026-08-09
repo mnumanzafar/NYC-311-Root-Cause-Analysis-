@@ -1,0 +1,93 @@
+database:
+  schema_raw: raw
+  schema_staging: staging
+  schema_marts: marts
+
+source:
+  socrata_domain: data.cityofnewyork.us
+  dataset_id: erm2-nwe9
+  page_size: 50000
+
+analysis:
+  date_start: "2019-01-01"
+  date_end: "2024-12-31"
+  anomaly_window:
+    start: "2023-07-01"
+    end: "2023-09-30"
+  baseline_years: 3
+  rolling_window_days: 28
+  sigma_threshold: 2.0
+  alpha: 0.01
+  changepoint:
+    model: "rbf"
+    penalty: 10
+  isolation_forest:
+    contamination: 0.01
+    random_state: 42
+
+segments:
+  - borough
+  - complaint_type
+  - open_data_channel_type
+  - agency
+
+external:
+  weather:
+    archive_url: "https://archive-api.open-meteo.com/v1/archive"
+    stations:
+      - {borough: "MANHATTAN",     name: "Central Park",   lat: 40.7794, lon: -73.9692}
+      - {borough: "BROOKLYN",      name: "Brooklyn",       lat: 40.6782, lon: -73.9442}
+      - {borough: "QUEENS",        name: "LaGuardia",      lat: 40.7769, lon: -73.8740}
+      - {borough: "BRONX",         name: "Bronx",          lat: 40.8448, lon: -73.8648}
+      - {borough: "STATEN ISLAND", name: "Staten Island",  lat: 40.5795, lon: -74.1502}
+  holidays:
+    country: "US"
+    subdiv: "NY"
+    extra_observances: {}   # e.g. {"2023-07-03": "NYC summer closure"}
+  thresholds:
+    hot_day_f: 90
+    freezing_day_f: 32
+    heavy_rain_in: 1.0
+    high_wind_mph: 30
+
+reporting:
+  export_dir: reports/exports
+  nightly:
+    out_dir: reports/exports/nightly
+    format: all              # csv | pdf | xlsx | both | all
+    week_days: 7             # length of the post-change window
+    baseline_weeks: 4        # weeks of baseline immediately before it
+    lag_days: 1              # ignore the newest N days (late-arriving 311 rows)
+    alpha: 0.01
+    filter_state_file: powerbi/filter_state.json
+  email:
+    enabled: false           # flip on once SMTP_* is set in the environment
+    host: null               # overridden by SMTP_HOST
+    port: 587
+    user: null               # overridden by SMTP_USER
+    starttls: true
+    sender: null             # overridden by EXPORT_EMAIL_FROM
+    subject_prefix: "[NYC 311 nightly]"
+  alerts:
+    enabled: true            # gate the nightly e-mail on the policy below
+    alpha: 0.01              # BH q-value cut-off for "significant cohort"
+    min_significant: 1       # how many significant cohorts force a send
+    min_abs_change: 25       # ignore significant-but-tiny cohorts
+    net_pct_threshold: 10    # citywide net change, % of normalised baseline
+    driver_pp_threshold: 15  # driver-day share move, percentage points
+    top_n: 5                 # cohorts tracked for top-driver changes
+    state_file: reports/exports/nightly/alert_state.json
+  slack:
+    enabled: true            # needs SLACK_WEBHOOK_URL or SLACK_BOT_TOKEN
+    channel: null            # overridden by SLACK_CHANNEL
+  audit:
+    enabled: true                       # write <stem>_audit.json/.md per export
+    log_file: reports/exports/audit_log.jsonl
+  metrics:
+    enabled: true                       # Prometheus textfile after every nightly run
+    textfile: reports/metrics/nyc311.prom
+    pushgateway: null                   # overridden by PROMETHEUS_PUSHGATEWAY_URL
+    job: nyc311_nightly
+  status:
+    html_out: reports/status.html
+    freshness_budget_days: 3 # see src/reporting/status.py for per-table budgets

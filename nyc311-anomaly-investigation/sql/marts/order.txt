@@ -1,0 +1,6 @@
+# Marts that other marts read from must be built first.
+mart_daily_volume_enriched.sql
+mart_daily_volume_enriched_by_type.sql
+mart_driver_flag_examples.sql
+mart_cohort_daily.sql
+mart_cohort_comparison.sql

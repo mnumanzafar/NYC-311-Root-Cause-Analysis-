@@ -1,0 +1,343 @@
+// ---------------------------------------------------------------------------
+// NYC 311 Root Cause Investigation — DAX measure library
+// Paste into a "Measures" table in the .pbix (Home > Enter data > blank table).
+// Fact  = marts.mart_daily_volume_enriched_by_type  (date x borough x complaint_type)
+// Date  = staging.stg_calendar (marked as date table, key = date_day)
+// Driver= marts.mart_daily_driver_events (date x borough x driver_type)
+// ---------------------------------------------------------------------------
+
+// --- Core volume -----------------------------------------------------------
+Volume = SUM ( Fact[volume] )
+
+Volume LY = CALCULATE ( [Volume], SAMEPERIODLASTYEAR ( Calendar[date_day] ) )
+
+YoY % = DIVIDE ( [Volume] - [Volume LY], [Volume LY] )
+
+Volume PY Same Weekday =
+CALCULATE ( [Volume], DATEADD ( Calendar[date_day], -364, DAY ) )
+
+// --- Baseline & anomaly band ----------------------------------------------
+Rolling Mean 28D =
+AVERAGEX (
+    DATESINPERIOD ( Calendar[date_day], MAX ( Calendar[date_day] ), -28, DAY ),
+    [Volume]
+)
+
+Rolling Sigma 28D =
+STDEVX.S (
+    DATESINPERIOD ( Calendar[date_day], MAX ( Calendar[date_day] ), -28, DAY ),
+    [Volume]
+)
+
+Band Upper 2s = [Rolling Mean 28D] + 2 * [Rolling Sigma 28D]
+Band Lower 2s = MAX ( 0, [Rolling Mean 28D] - 2 * [Rolling Sigma 28D] )
+
+Rolling Z = DIVIDE ( [Volume] - [Rolling Mean 28D], [Rolling Sigma 28D] )
+
+Anomaly Flag = IF ( ABS ( [Rolling Z] ) > 2, 1, 0 )
+
+Anomaly Days = SUMX ( VALUES ( Calendar[date_day] ), [Anomaly Flag] )
+
+Excess vs Baseline = [Volume] - [Rolling Mean 28D]
+
+// Marker series: plots the actual value only on anomalous days (scatter overlay).
+Anomaly Marker = IF ( [Anomaly Flag] = 1, [Volume] )
+
+// --- Weather / holiday overlays -------------------------------------------
+Avg Max Temp   = AVERAGE ( Fact[temp_max_f] )
+Total Precip   = MAX ( Fact[precip_in] )       // already day-level, avoid double count
+Total Snowfall = MAX ( Fact[snowfall_in] )
+
+Driver Day Count = DISTINCTCOUNT ( Driver[date_day] )
+
+Driver Labels =
+CONCATENATEX ( VALUES ( Driver[driver_type] ), Driver[driver_type], ", " )
+
+Is Holiday Day =
+IF ( CALCULATE ( COUNTROWS ( Driver ), Driver[driver_type] = "Holiday" ) > 0, 1, 0 )
+
+// Overlay band height: scales driver shading to the current y-axis range so the
+// weather/holiday ribbon is visible on any filter context.
+Overlay Band =
+VAR MaxV = CALCULATE ( MAXX ( VALUES ( Calendar[date_day] ), [Volume] ), ALLSELECTED ( Calendar ) )
+RETURN IF ( [Driver Day Count] > 0, MaxV * 1.05 )
+
+// --- Driver-conditional comparisons (the "does weather explain it?" panel) --
+Volume on Driver Days =
+CALCULATE ( [Volume], CALCULATETABLE ( VALUES ( Driver[date_day] ) ) )
+
+Avg Volume | Driver Days =
+AVERAGEX ( CALCULATETABLE ( VALUES ( Calendar[date_day] ), Driver ), [Volume] )
+
+Avg Volume | Non-Driver Days =
+VAR DriverDates = CALCULATETABLE ( VALUES ( Driver[date_day] ), ALLSELECTED ( Driver ) )
+RETURN AVERAGEX ( EXCEPT ( VALUES ( Calendar[date_day] ), DriverDates ), [Volume] )
+
+Driver Lift % =
+DIVIDE (
+    [Avg Volume | Driver Days] - [Avg Volume | Non-Driver Days],
+    [Avg Volume | Non-Driver Days]
+)
+
+// --- Contribution to change (cohort / drilldown pages) ---------------------
+Volume Selected Window =
+CALCULATE ( [Volume], KEEPFILTERS ( Calendar[in_event_window] = TRUE ) )
+
+Volume Baseline Window =
+CALCULATE ( [Volume], KEEPFILTERS ( Calendar[in_baseline_window] = TRUE ) )
+
+Delta vs Baseline = [Volume Selected Window] - [Volume Baseline Window]
+
+Contribution to Change % =
+DIVIDE (
+    [Delta vs Baseline],
+    CALCULATE ( [Delta vs Baseline], ALLSELECTED ( Fact[complaint_type] ), ALLSELECTED ( Fact[borough] ) )
+)
+
+// --- Formatting helpers ----------------------------------------------------
+Anomaly Color =
+SWITCH (
+    TRUE (),
+    [Rolling Z] > 2,  "#C0392B",
+    [Rolling Z] < -2, "#2471A3",
+    "#7F8C8D"
+)
+
+Title | Timeline =
+"Daily 311 volume — "
+    & IF ( ISFILTERED ( Fact[borough] ), CONCATENATEX ( VALUES ( Fact[borough] ), Fact[borough], ", " ), "All boroughs" )
+    & " | " & [Anomaly Days] & " anomalous days"
+
+// ===========================================================================
+// Cohort comparison (Page 6) — baseline vs post-change
+// Tables: CohortCompare (marts.mart_cohort_comparison, period-level)
+//         CohortDaily   (marts.mart_cohort_daily, day-level, has cohort_period)
+// CohortDaily is related to DimBorough / DimComplaintType / DimPeriod so the
+// same slicers drive both the summary and the distribution visuals.
+// ===========================================================================
+
+Cohort Volume = SUM ( CohortDaily[volume] )
+
+Cohort Days = DISTINCTCOUNT ( CohortDaily[date_day] )
+
+Cohort Daily Avg = DIVIDE ( [Cohort Volume], [Cohort Days] )
+
+Baseline Volume =
+CALCULATE ( [Cohort Volume], KEEPFILTERS ( CohortDaily[cohort_period] = "Baseline" ) )
+
+Post Volume =
+CALCULATE ( [Cohort Volume], KEEPFILTERS ( CohortDaily[cohort_period] = "Post-change" ) )
+
+Baseline Daily Avg =
+CALCULATE ( [Cohort Daily Avg], KEEPFILTERS ( CohortDaily[cohort_period] = "Baseline" ) )
+
+Post Daily Avg =
+CALCULATE ( [Cohort Daily Avg], KEEPFILTERS ( CohortDaily[cohort_period] = "Post-change" ) )
+
+// Length-normalised: unequal windows must never be compared on raw totals.
+Baseline Volume | Scaled =
+VAR PostDays = CALCULATE ( [Cohort Days], KEEPFILTERS ( CohortDaily[cohort_period] = "Post-change" ) )
+RETURN [Baseline Daily Avg] * PostDays
+
+Cohort Delta = [Post Volume] - [Baseline Volume | Scaled]
+
+Cohort Delta % = DIVIDE ( [Post Daily Avg] - [Baseline Daily Avg], [Baseline Daily Avg] )
+
+Cohort Contribution % =
+DIVIDE (
+    [Cohort Delta],
+    CALCULATE (
+        [Cohort Delta],
+        ALLSELECTED ( DimBorough[borough] ),
+        ALLSELECTED ( DimComplaintType[complaint_type] )
+    )
+)
+
+// Rank cohorts by how much they moved, not by how big they are.
+Cohort Rank by Delta =
+RANKX (
+    ALLSELECTED ( DimComplaintType[complaint_type] ),
+    [Cohort Delta],
+    ,
+    DESC,
+    DENSE
+)
+
+// --- Significance / effect size -------------------------------------------
+Cohort Effect Size d =
+VAR B  = [Baseline Daily Avg]
+VAR P  = [Post Daily Avg]
+VAR SB = CALCULATE ( STDEV.S ( CohortDaily[volume] ), KEEPFILTERS ( CohortDaily[cohort_period] = "Baseline" ) )
+VAR SP = CALCULATE ( STDEV.S ( CohortDaily[volume] ), KEEPFILTERS ( CohortDaily[cohort_period] = "Post-change" ) )
+VAR Pooled = SQRT ( DIVIDE ( SB * SB + SP * SP, 2 ) )
+RETURN DIVIDE ( P - B, Pooled )
+
+Cohort Welch t =
+VAR B  = [Baseline Daily Avg]
+VAR P  = [Post Daily Avg]
+VAR NB = CALCULATE ( [Cohort Days], KEEPFILTERS ( CohortDaily[cohort_period] = "Baseline" ) )
+VAR NP = CALCULATE ( [Cohort Days], KEEPFILTERS ( CohortDaily[cohort_period] = "Post-change" ) )
+VAR SB = CALCULATE ( STDEV.S ( CohortDaily[volume] ), KEEPFILTERS ( CohortDaily[cohort_period] = "Baseline" ) )
+VAR SP = CALCULATE ( STDEV.S ( CohortDaily[volume] ), KEEPFILTERS ( CohortDaily[cohort_period] = "Post-change" ) )
+RETURN DIVIDE ( P - B, SQRT ( DIVIDE ( SB * SB, NB ) + DIVIDE ( SP * SP, NP ) ) )
+
+// Approximate two-sided p-value via the normal tail (day counts are usually 28+).
+Cohort p-value approx =
+VAR T = ABS ( [Cohort Welch t] )
+RETURN IF ( ISBLANK ( T ), BLANK (), 2 * ( 1 - NORM.S.DIST ( T, TRUE ) ) )
+
+Cohort Significant =
+IF ( [Cohort p-value approx] <= 0.01 && ABS ( [Cohort Effect Size d] ) >= 0.5, 1, 0 )
+
+Cohort Verdict =
+SWITCH (
+    TRUE (),
+    ISBLANK ( [Cohort Delta] ), BLANK (),
+    [Cohort Significant] = 1 && [Cohort Delta] > 0, "▲ Significant increase",
+    [Cohort Significant] = 1 && [Cohort Delta] < 0, "▼ Significant decrease",
+    "— No clear shift"
+)
+
+Cohort Verdict Color =
+SWITCH (
+    TRUE (),
+    [Cohort Significant] = 1 && [Cohort Delta] > 0, "#C0392B",
+    [Cohort Significant] = 1 && [Cohort Delta] < 0, "#2471A3",
+    "#7F8C8D"
+)
+
+// --- Confounder guards ------------------------------------------------------
+Cohort Driver Day % =
+DIVIDE (
+    CALCULATE ( [Cohort Days], KEEPFILTERS ( CohortDaily[primary_driver] <> "Normal" ) ),
+    [Cohort Days]
+)
+
+Cohort Driver Day % Delta =
+CALCULATE ( [Cohort Driver Day %], KEEPFILTERS ( CohortDaily[cohort_period] = "Post-change" ) )
+    - CALCULATE ( [Cohort Driver Day %], KEEPFILTERS ( CohortDaily[cohort_period] = "Baseline" ) )
+
+Cohort Temp Delta =
+CALCULATE ( AVERAGE ( CohortDaily[temp_max_f] ), KEEPFILTERS ( CohortDaily[cohort_period] = "Post-change" ) )
+    - CALCULATE ( AVERAGE ( CohortDaily[temp_max_f] ), KEEPFILTERS ( CohortDaily[cohort_period] = "Baseline" ) )
+
+// Weather-adjusted delta: reprice the post window at the baseline's rate for
+// each driver label, so a hotter post period does not read as a real shift.
+Cohort Delta | Weather Adjusted =
+VAR Expected =
+    SUMX (
+        VALUES ( CohortDaily[primary_driver] ),
+        VAR BaseRate =
+            CALCULATE ( [Cohort Daily Avg], KEEPFILTERS ( CohortDaily[cohort_period] = "Baseline" ) )
+        VAR PostDaysDriver =
+            CALCULATE ( [Cohort Days], KEEPFILTERS ( CohortDaily[cohort_period] = "Post-change" ) )
+        RETURN BaseRate * PostDaysDriver
+    )
+RETURN [Post Volume] - Expected
+
+Cohort Unexplained Share =
+DIVIDE ( [Cohort Delta | Weather Adjusted], [Cohort Delta] )
+
+// Same-weekday comparison removes calendar-mix distortion in unequal windows.
+Cohort Delta | Weekday Matched =
+SUMX (
+    VALUES ( CohortDaily[day_name] ),
+    VAR PostDaysDow = CALCULATE ( [Cohort Days], KEEPFILTERS ( CohortDaily[cohort_period] = "Post-change" ) )
+    RETURN CALCULATE ( [Post Volume] ) - [Baseline Daily Avg] * PostDaysDow
+)
+
+Cohort Mix Warning =
+IF (
+    ABS ( [Cohort Driver Day % Delta] ) > 0.15 || ABS ( [Cohort Temp Delta] ) > 8,
+    "⚠ Periods are not weather/calendar comparable — read the adjusted delta",
+    ""
+)
+
+Title | Cohort =
+"Baseline vs post-change — "
+    & IF ( ISFILTERED ( DimBorough[borough] ), CONCATENATEX ( VALUES ( DimBorough[borough] ), DimBorough[borough], ", " ), "All boroughs" )
+    & " | " & FORMAT ( [Cohort Delta], "+#,##0;-#,##0" ) & " requests ("
+    & FORMAT ( [Cohort Delta %], "+0.0%;-0.0%" ) & ")"
+
+// ============================================================================
+// Drillthrough — driver flag -> borough / category / day / example complaints
+// Backed by marts.mart_driver_flag_examples (DriverExamples table).
+// ============================================================================
+
+Driver Days =
+COUNTROWS ( DISTINCT ( DriverExamples[date_day] ) )
+
+Driver Excess Volume =
+SUM ( DriverExamples[excess_vs_baseline] )
+
+Driver Excess % =
+DIVIDE (
+    [Driver Excess Volume],
+    SUM ( DriverExamples[rolling_mean_28d] )
+) * 100
+
+Driver Anomaly Days =
+CALCULATE (
+    COUNTROWS ( DISTINCT ( DriverExamples[date_day] ) ),
+    DriverExamples[is_anomaly_day] = TRUE ()
+)
+
+Driver Avg Z =
+AVERAGE ( DriverExamples[rolling_z] )
+
+// Share of this driver's excess carried by the current category selection —
+// the number the drillthrough page leads with.
+Driver Share of Excess % =
+VAR Selected = [Driver Excess Volume]
+VAR AllTypes =
+    CALCULATE ( [Driver Excess Volume], REMOVEFILTERS ( DriverExamples[complaint_type] ) )
+RETURN DIVIDE ( Selected, AllTypes ) * 100
+
+// Rank of the complaint type inside the drilled driver + borough.
+Driver Example Rank =
+MIN ( DriverExamples[example_rank] )
+
+// Top 5 example complaint types, rendered as a card on the drillthrough page.
+Driver Top Examples =
+VAR Ranked =
+    TOPN (
+        5,
+        SUMMARIZE (
+            DriverExamples,
+            DriverExamples[complaint_type],
+            "Excess", [Driver Excess Volume]
+        ),
+        [Excess], DESC
+    )
+RETURN
+CONCATENATEX (
+    Ranked,
+    DriverExamples[complaint_type] & " (" & FORMAT ( [Excess], "+#,0;-#,0" ) & ")",
+    UNICHAR ( 10 ),
+    [Excess], DESC
+)
+
+// Header that echoes the drillthrough context back to the analyst.
+Drillthrough Title =
+VAR Flag = SELECTEDVALUE ( DriverExamples[driver_label], "All drivers" )
+VAR Bor = IF ( ISFILTERED ( DriverExamples[borough] ),
+               CONCATENATEX ( VALUES ( DriverExamples[borough] ), DriverExamples[borough], ", " ),
+               "All boroughs" )
+VAR Cat = IF ( ISFILTERED ( DriverExamples[complaint_type] ),
+               CONCATENATEX ( VALUES ( DriverExamples[complaint_type] ), DriverExamples[complaint_type], ", " ),
+               "All categories" )
+RETURN Flag & "  •  " & Bor & "  •  " & Cat
+
+Drillthrough Window Label =
+VAR MinD = MIN ( DriverExamples[date_day] )
+VAR MaxD = MAX ( DriverExamples[date_day] )
+RETURN FORMAT ( MinD, "d mmm yyyy" ) & " – " & FORMAT ( MaxD, "d mmm yyyy" )
+
+// Significance gate reused from the cohort layer, so only flags worth drilling
+// into are clickable (conditional formatting on the driver matrix).
+Driver Flag Significant =
+VAR Q = [Cohort q-value]
+RETURN IF ( NOT ISBLANK ( Q ) && Q < [Alpha] && ABS ( [Cohort Delta] ) >= 25, 1, 0 )
+
+Driver Flag Marker =
+IF ( [Driver Flag Significant] = 1, "▲ significant", "" )

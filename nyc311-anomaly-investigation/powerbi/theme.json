@@ -1,0 +1,41 @@
+{
+  "name": "NYC311 Investigation",
+  "dataColors": [
+    "#1F4E79",
+    "#C0392B",
+    "#2E86C1",
+    "#E67E22",
+    "#27AE60",
+    "#8E44AD",
+    "#7F8C8D",
+    "#16A085"
+  ],
+  "background": "#FFFFFF",
+  "foreground": "#1B2631",
+  "tableAccent": "#1F4E79",
+  "good": "#27AE60",
+  "neutral": "#7F8C8D",
+  "bad": "#C0392B",
+  "maximum": "#C0392B",
+  "minimum": "#2E86C1",
+  "textClasses": {
+    "title": { "fontFace": "Segoe UI Semibold", "fontSize": 14, "color": "#1B2631" },
+    "label": { "fontFace": "Segoe UI", "fontSize": 10, "color": "#4D5656" },
+    "callout": { "fontFace": "Segoe UI Light", "fontSize": 34, "color": "#1F4E79" }
+  },
+  "visualStyles": {
+    "*": {
+      "*": {
+        "background": [{ "show": true, "color": { "solid": { "color": "#FFFFFF" } } }],
+        "border": [{ "show": true, "color": { "solid": { "color": "#E5E8E8" } }, "radius": 6 }],
+        "visualHeader": [{ "showVisualInformationIcon": true }]
+      }
+    },
+    "lineChart": {
+      "*": {
+        "lineStyles": [{ "strokeWidth": 2, "lineStyle": "solid" }],
+        "valueAxis": [{ "show": true, "gridlineStyle": "dotted" }]
+      }
+    }
+  }
+}

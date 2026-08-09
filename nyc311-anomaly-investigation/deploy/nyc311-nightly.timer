@@ -1,0 +1,11 @@
+[Unit]
+Description=Run the NYC 311 nightly cohort export at 05:30
+Requires=nyc311-nightly.service
+
+[Timer]
+OnCalendar=*-*-* 05:30:00
+Persistent=true
+RandomizedDelaySec=300
+
+[Install]
+WantedBy=timers.target
